@@ -293,6 +293,11 @@ def isIndependentOf (L : List MVarId) (g : MVarId) : MetaM Bool := g.withContext
   -- Finally, we check if the goal `g` appears in the type of any of the goals `L`.
   L.allM fun g' => do pure !((← getMVars (← g'.getType)).contains g)
 
+/-- Solve a goal by synthesizing an instance. -/
+-- FIXME: probably can just be `g.inferInstance` once leanprover/lean4#2054 is fixed
+def synthInstance (g : MVarId) : MetaM Unit := do
+  g.assign (← Lean.Meta.synthInstance (← g.getType))
+
 /--
 Replace hypothesis `hyp` in goal `g` with `proof : typeNew`.
 The new hypothesis is given the same user name as the original,
@@ -436,3 +441,10 @@ where
       match ← tac goal with
       | none => acc.modify λ s => s.push goal
       | some goals => goals.forM (go acc)
+
+/-- Return local hypotheses which are not "implementation detail", as `Expr`s. -/
+def getLocalHyps [Monad m] [MonadLCtx m] : m (Array Expr) := do
+  let mut hs := #[]
+  for d in ← getLCtx do
+    if !d.isImplementationDetail then hs := hs.push d.toExpr
+  return hs
