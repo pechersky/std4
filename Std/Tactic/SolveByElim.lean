@@ -53,6 +53,28 @@ namespace SolveByElim
 
 private def emoji (e:Except ε α) := if e.toBool then checkEmoji else crossEmoji
 
+
+/--
+`applyTactics lemmas goal` will return a list of tactics,
+corresponding to applying each one of the lemmas to the goal `goal`.
+
+Providing this to the `backtracking` tactic,
+we can perform backtracking search based on applying a list of lemmas.
+
+``applyTactics (trace := `name)`` will construct trace nodes for ``name` indicating which
+calls to `apply` succeeded or failed.
+-/
+def applyTacticsAux (cfg : ApplyConfig) (transparency : TransparencyMode)
+    (e : Expr) (g : MVarId) : MetaM (List MVarId) := do
+    withTraceNode `Meta.Tactic.solveByElim (return m!"{emoji ·} trying to apply: {e}") do
+      let goals ← withTransparency transparency (g.apply e cfg)
+      -- When we call `apply` interactively, `Lean.Elab.Tactic.evalApplyLikeTactic`
+      -- deals with closing new typeclass goals by calling
+      -- `Lean.Elab.Term.synthesizeSyntheticMVarsNoPostponing`.
+      -- It seems we can't reuse that machinery down here in `MetaM`,
+      -- so we just settle for trying to close each subgoal using `inferInstance`.
+      goals.filterM fun g => try g.inferInstance; pure false catch _ => pure true
+
 /--
 `applyTactics lemmas goal` will return a list of tactics,
 corresponding to applying each one of the lemmas to the goal `goal`.
@@ -66,14 +88,7 @@ calls to `apply` succeeded or failed.
 def applyTactics (cfg : ApplyConfig := {}) (transparency : TransparencyMode := .default)
     (lemmas : List Expr) (g : MVarId) : Nondet MetaM (List MVarId) :=
   (Nondet.ofList lemmas).filterMapM fun e => observing? do
-    withTraceNode `Meta.Tactic.solveByElim (return m!"{emoji ·} trying to apply: {e}") do
-      let goals ← withTransparency transparency (g.apply e cfg)
-      -- When we call `apply` interactively, `Lean.Elab.Tactic.evalApplyLikeTactic`
-      -- deals with closing new typeclass goals by calling
-      -- `Lean.Elab.Term.synthesizeSyntheticMVarsNoPostponing`.
-      -- It seems we can't reuse that machinery down here in `MetaM`,
-      -- so we just settle for trying to close each subgoal using `inferInstance`.
-      goals.filterM fun g => try g.inferInstance; pure false catch _ => pure true
+    applyTacticsAux cfg transparency e g
 
 /--
 `applyFirst lemmas goal` applies the first of the `lemmas`
@@ -222,8 +237,10 @@ def applyLemmas (cfg : Config) (lemmas : List (TermElabM Expr)) (ctx : TermElabM
   -- We handle `cfg.symm` by saturating hypotheses of all goals using `symm`.
   -- This has better performance that the mathlib3 approach.
   let g ← if cfg.symm then g.symmSaturate else pure g
-  let es ← elabContextLemmas g lemmas ctx
-  return applyTactics cfg.toApplyConfig cfg.transparency es g
+  let lemmas ← elabContextLemmas g lemmas ctx
+  let transparency := cfg.transparency
+  let cfg := cfg.toApplyConfig
+  return (Nondet.ofList lemmas).filterMapM fun e => observing? (applyTacticsAux cfg transparency e g)
 
 /-- Applies the first possible lemma to the goal. -/
 def applyFirstLemma (cfg : Config) (lemmas : List (TermElabM Expr)) (ctx : TermElabM (List Expr))
