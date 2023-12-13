@@ -240,7 +240,8 @@ def applyLemmas (cfg : Config) (lemmas : List (TermElabM Expr)) (ctx : TermElabM
   let lemmas ← elabContextLemmas g lemmas ctx
   let transparency := cfg.transparency
   let cfg := cfg.toApplyConfig
-  return (Nondet.ofList lemmas).filterMapM fun e => observing? (applyTacticsAux cfg transparency e g)
+  return (Nondet.ofList lemmas).filterMapM fun e =>
+    observing? (applyTacticsAux cfg transparency e g)
 
 /-- Applies the first possible lemma to the goal. -/
 def applyFirstLemma (cfg : Config) (lemmas : List (TermElabM Expr)) (ctx : TermElabM (List Expr))
