@@ -412,7 +412,7 @@ Run `librarySearchCore` on both the goal and `symm` applied to the goal.
 -/
 def librarySearchSymm (searchFn : CandidateFinder) (tgt : Expr) : MetaM (Array Expr) := do
   let l1 ← librarySearchCore searchFn tgt
-  if let some (fn, symm) ← findSymm tgt then
+  if let some (fn, symm) ← try findSymm tgt catch _ => pure none then
     let l2 ← librarySearchCore searchFn symm
     let l2 ← l2.mapM (mapForallTelescope (fun e => pure (mkApp fn e)))
     pure $ interleave l1 l2
@@ -513,11 +513,11 @@ def mkHeartbeatCheck (leavePercent : Nat) : MetaM (MetaM Bool) := do
       return (← getRemainingHeartbeats) < hbThreshold
 
 /-- Shortcut for calling `solveByElim`. -/
-def solveByElim (required : List Expr) (exfalso := false) (goals : List MVarId) := do
+def solveByElim (required : List Expr) (exfalso : Bool) (goals : List MVarId) (maxDepth : Nat) := do
   -- There is only a marginal decrease in performance for using the `symm` option for `solveByElim`.
   -- (measured via `lake build && time lake env lean test/librarySearch.lean`).
   let cfg : SolveByElim.Config :=
-    { maxDepth := 6, exfalso := exfalso, symm := true, commitIndependentGoals := true }
+    { maxDepth, exfalso := exfalso, symm := true, commitIndependentGoals := true }
   let cfg := if !required.isEmpty then cfg.requireUsingAll required else cfg
   let ⟨lemmas, ctx⟩ ← SolveByElim.mkAssumptionSet false false [] [] #[]
   SolveByElim.solveByElim cfg lemmas ctx goals
@@ -533,6 +533,11 @@ private instance : Inhabited LibSearchState where
 
 private initialize ext : EnvExtension LibSearchState ←
   registerEnvExtension (IO.mkRef .none)
+
+private def librarySearchEmoji : Except ε (Option α) → String
+| .error _ => bombEmoji
+| .ok (some _) => crossEmoji
+| .ok none => checkEmoji
 
 /--
 Try to solve the goal either by:
@@ -550,8 +555,10 @@ unless the goal was completely solved.)
 (Note that if `solveByElim` solves some but not all subsidiary goals,
 this is not currently tracked.)
 -/
-def librarySearch (goal : MVarId) (tactic : List MVarId → MetaM (List MVarId))
-    (allowFailure : Bool := true) (leavePercentHeartbeats : Nat := 10) :
+def librarySearch (goal : MVarId)
+    (tactic : Bool → List MVarId → MetaM (List MVarId))
+    (allowFailure : Bool := true)
+    (leavePercentHeartbeats : Nat := 10) :
     MetaM (Option (Array (List MVarId × MetavarContext))) := do
   let importFinder ← do
         let r := ext.getState (←getEnv)
@@ -565,22 +572,22 @@ def librarySearch (goal : MVarId) (tactic : List MVarId → MetaM (List MVarId))
       let localMap ← (← getEnv).constants.map₂.foldlM (init := {}) (DiscrTreeFinder.updateTree {})
       let locals := (← localMap.getMatch  ty {}).reverse
       pure <| locals ++ (← importFinder ty)
-  let librarySearchEmoji := fun
-    | .error _ => bombEmoji
-    | .ok (some _) => crossEmoji
-    | .ok none => checkEmoji
   withTraceNode `Tactic.librarySearch (return m!"{librarySearchEmoji ·} {← goal.getType}") do
   profileitM Exception "librarySearch" (← getOptions) do
+  (do
+    _ ← tactic true [goal]
+    return none)  <|>
+  (do
     -- Create predicate that returns true when running low on heartbeats.
     let shouldAbort ← mkHeartbeatCheck leavePercentHeartbeats
     let act e := do
         if ←shouldAbort then
           abortSpeculation
-        librarySearchLemma tactic allowFailure goal e
-    let candidates ← librarySearchCore searchFn (← goal.getType)
+        librarySearchLemma (tactic false) allowFailure goal e
+    let candidates ← librarySearchSymm searchFn (← goal.getType)
     match ← tryOnEach act candidates with
     | none => pure none
-    | some a => pure (some (← sortResults goal a))
+    | some a => pure (some (← sortResults goal a)))
 
 open Lean.Parser.Tactic
 
@@ -595,9 +602,9 @@ open Lean.Parser.Tactic
 syntax (name := std_exact?') "std_exact?" (config)? (simpArgs)? (" using " (colGt ident),+)?
     ("=>" tacticSeq)? : tactic
 
---/-- Syntax for `std_apply?` -/
---syntax (name := apply?') "std_apply?" (config)? (simpArgs)?
---  (" using " (colGt term),+)? : tactic
+/-- Syntax for `std_apply?` -/
+syntax (name := apply?') "std_apply?" (config)? (simpArgs)?
+  (" using " (colGt term),+)? : tactic
 
 open Elab.Tactic Elab Tactic
 open Parser.Tactic (tacticSeq)
@@ -612,7 +619,7 @@ def exact? (tk : Syntax) (required : Option (Array (TSyntax `term)))
     let required := (← (required.getD #[]).mapM getFVarId).toList.map .fvar
     let tactic ←
       match solver with
-      | none => pure (solveByElim required)
+      | none => pure (fun g => solveByElim required g (maxDepth := 6))
       | some t =>
         let _ <- mkInitialTacticInfo t
         throwError "Do not yet support custom exact?/apply? tactics."
@@ -635,8 +642,8 @@ elab_rules : tactic
   | `(tactic| std_exact? $[using $[$required],*]? $[=> $solver]?) => do
   exact? (← getRef) required solver true
 
---elab_rules : tactic | `(tactic| std_apply? $[using $[$required],*]?) => do
---  exact? (← getRef) required false
+elab_rules : tactic | `(tactic| std_apply? $[using $[$required],*]?) => do
+  exact? (← getRef) required none false
 
 --/-- Deprecation warning for `library_search`. -/
 --elab tk:"library_search" : tactic => do
@@ -650,7 +657,7 @@ elab tk:"exact?%" : term <= expectedType => do
   let goal ← mkFreshExprMVar expectedType
   let (_, introdGoal) ← goal.mvarId!.intros
   introdGoal.withContext do
-    let tactic := solveByElim []
+    let tactic := fun exfalso g => solveByElim []  (maxDepth := 6) exfalso g
     if let some suggestions ← librarySearch introdGoal tactic then
       reportOutOfHeartbeats `library_search tk
       for suggestion in suggestions do
