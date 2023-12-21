@@ -121,7 +121,6 @@ import Std.Linter.UnnecessarySeqFocus
 import Std.Linter.UnreachableTactic
 import Std.Logic
 import Std.Tactic.Alias
-import Std.Tactic.Backtrack
 import Std.Tactic.Basic
 import Std.Tactic.ByCases
 import Std.Tactic.Case
@@ -161,6 +160,7 @@ import Std.Tactic.ShowTerm
 import Std.Tactic.SimpTrace
 import Std.Tactic.Simpa
 import Std.Tactic.SolveByElim
+import Std.Tactic.SolveByElim.Backtrack
 import Std.Tactic.SqueezeScope
 import Std.Tactic.TryThis
 import Std.Tactic.Unreachable
