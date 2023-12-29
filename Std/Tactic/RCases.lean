@@ -486,10 +486,15 @@ The terminating continuation used in `rcasesCore` and `rcasesContinue`. We speci
 `α` to `Array MVarId` to collect the list of goals, and given the list of `clears`, it attempts to
 clear them from the goal and adds the goal to the list.
 -/
-def finish (g : MVarId) (fs : FVarSubst) (clears : Array FVarId)
+def finish (toTag : Array (Ident × FVarId) := #[])
+  (g : MVarId) (fs : FVarSubst) (clears : Array FVarId)
   (gs : Array MVarId) : TermElabM (Array MVarId) := do
   let cs : Array Expr := (clears.map fs.get).filter Expr.isFVar
-  gs.push <$> tryClearMany' g (cs.map Expr.fvarId!)
+  let g ← tryClearMany' g (cs.map Expr.fvarId!)
+  g.withContext do
+    for (stx, fvar) in toTag do
+      Term.addLocalVarInfo stx (fs.get fvar)
+  return gs.push g
 
 open Elab
 
@@ -510,7 +515,7 @@ partial def RCasesPatt.parse (stx : Syntax) : MetaM RCasesPatt :=
 -- extracted from elabCasesTargets
 /-- Generalize all the arguments as specified in `args` to fvars if they aren't already -/
 def generalizeExceptFVar (goal : MVarId) (args : Array GeneralizeArg) :
-    MetaM (Array Expr × MVarId) := do
+    MetaM (Array Expr × Array FVarId × MVarId) := do
   let argsToGeneralize := args.filter fun arg => !(arg.expr.isFVar && arg.hName?.isNone)
   let (fvarIdsNew, goal) ← goal.generalize argsToGeneralize
   let mut result := #[]
@@ -521,13 +526,13 @@ def generalizeExceptFVar (goal : MVarId) (args : Array GeneralizeArg) :
     else
       result := result.push (mkFVar fvarIdsNew[j]!)
       j := j+1
-  pure (result, goal)
+  pure (result, fvarIdsNew[j:], goal)
 
 /--
 Given a list of targets of the form `e` or `h : e`, and a pattern, match all the targets
 against the pattern. Returns the list of produced subgoals.
 -/
-def rcases (tgts : Array (Option Name × Syntax))
+def rcases (tgts : Array (Option Ident × Syntax))
   (pat : RCasesPatt) (g : MVarId) : TermElabM (List MVarId) := do
   let pats ← match tgts.size with
   | 0 => return [g]
@@ -540,9 +545,10 @@ def rcases (tgts : Array (Option Name × Syntax))
       pure (.typed ref pat (← Term.exprToSyntax ty), some ty)
     | _ => pure (pat, none)
     let expr ← Term.ensureHasType ty (← Term.elabTerm tgt ty)
-    pure (pat, { expr, xName? := pat.name?, hName? : GeneralizeArg })
-  let (vs, g) ← generalizeExceptFVar g args
-  let gs ← rcasesContinue g {} #[] #[] (pats.zip vs).toList finish
+    pure (pat, { expr, xName? := pat.name?, hName? := hName?.map (·.getId) : GeneralizeArg })
+  let (vs, hs, g) ← generalizeExceptFVar g args
+  let toTag := tgts.filterMap (·.1) |>.zip hs
+  let gs ← rcasesContinue g {} #[] #[] (pats.zip vs).toList (finish (toTag := toTag))
   pure gs.toList
 
 /--
@@ -687,7 +693,7 @@ elab (name := rcases) tk:"rcases" tgts:casesTarget,* pat:((" with " rcasesPatLo)
   | #[] => pure $ RCasesPatt.tuple tk []
   | _ => throwUnsupportedSyntax
   let tgts := tgts.getElems.map fun tgt =>
-    (if tgt.raw[0].isNone then none else some tgt.raw[0][0].getId, tgt.raw[1])
+    (if tgt.raw[0].isNone then none else some ⟨tgt.raw[0][0]⟩, tgt.raw[1])
   let g ← getMainGoal
   g.withContext do replaceMainGoal (← RCases.rcases tgts pat g)
 
